@@ -11,6 +11,7 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.VoltageSensor;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit;
@@ -20,37 +21,43 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 public class TeleOpStupid extends OpMode {
 
     public static double targetVelocity = 0;
-    public static double toleranceFraction = 0.05;
+    public static double shooterTargetVelocity = 2800 * 0.425; // this was 0.4 before
+    public static double toleranceFraction = 0.04;
+    public static double spinUpDelaySec = 0;        // minimum wait after pressing A
+    public static double stableTimeSec = 0.5;       // must stay within tolerance this long
+    public static double feedPulseSec = 0.3;        // how long the intake feeds per shot
+    public static double shotDelaySec = 0.3;        // pause between shots so the flywheel can recover
+
+    public static double flywheelKF = 1.0 / 2800;   // 2800 = max ticks per sec
+    public static double flywheelKP = 0.005;
+    public static double flywheelKI = 0.001;
+    public static double flywheelKD = 0.0;
+    public static double flywheelIntegralMax = 0.2; // in motor power units
+    public static double nominalVoltage = 12.0;     // kF is calibrated at this battery voltage
 
     public static double[] rightFootPositions = { 0.14, 0.0 };        // { Extended, Retracted }
     public static double[] leftFootPositions = { 0.14, 0.0 };         // { Extended, Retracted }
-    // public static double[] wedgePositions = { 1.0, 0.5 };          // { Extended, Retracted } - disabled for now
     public static double[] compressionPositions = { 1.0, 0.0, 0.5 };  // { Pollen, Nectar, Blocking }
     public static double[] camPositions = { 0.0, 0.4 };               // { Pollen, Nectar }
 
-    // Pinpoint setup copied from last year (Cryptic2025-2026 PinpointLocalizer and MecanumDrive)
     public static double inPerTick = 0.00193071191602763;
-    public static double forwardPodY = 0;   // inches, sideways offset of the forward pod (left is positive)
-    public static double strafePodX = 0;    // inches, forward offset of the strafe pod (forward is positive)
+    public static double forwardPodY = 0;
+    public static double strafePodX = 0;
 
-    // Field heading that stick forward drives toward (-90 = toward the red alliance, down on the map)
-    public static double driverForwardDeg = -90;
+    public static double driverForwardDeg = 180;
 
-    // Pose the odometry is set to when the reset button is pressed (Pedro field coordinates, inches / degrees)
-    // Blue alliance: back against the top wall, top left corner, facing down toward the hive (-y)
-    public static double resetX = 9;
-    public static double resetY = 135;
-    public static double resetHeadingDeg = -90;
+    public static double resetX = 141.5;
+    public static double resetY = 141.5;
+    public static double resetHeadingDeg = 180;
 
-    // Auto aim (X button)
-    public static double centerX = 72;          // field center, Pedro 144 x 144 field
-    public static double centerY = 72;
-    public static double aimOffsetDeg = 0;      // angle from the bot's front to the shooter direction
-    public static double aimKP = 1.0;           // power per radian of error
+    public static double centerX = 70.75;
+    public static double centerY = 70.75;
+    public static double aimOffsetDeg = 0;
+    public static double aimKP = 1.0;
     public static double aimKI = 0.0;
     public static double aimKD = 0.08;
-    public static double aimIntegralMax = 0.3;  // clamp on the integral term (radian seconds)
-    public static double aimMinPower = 0.12;    // added in the direction of the error to overcome friction
+    public static double aimIntegralMax = 0.3;
+    public static double aimMinPower = 0.5;
     public static double aimMaxPower = 1.0;
     public static double aimToleranceDeg = 0.5;
 
@@ -59,16 +66,24 @@ public class TeleOpStupid extends OpMode {
     private double aimIntegral, aimLastError, aimLastTime;
     private boolean aimFirstLoop = true;
 
+    private boolean shooterActive = false;
+    private boolean feeding = false;
+    private double feedPhaseStart = -1e9;
+    private double shooterStartTime, stableStartTime = -1;
+    private double flywheelIntegral, flywheelLastError, flywheelLastTime;
+    private boolean flywheelFirstLoop = true;
+
     private DcMotorEx leftFront, rightFront, leftBack, rightBack;
     private DcMotorEx flywheelMotor, stage1IntakeMotor, stage2IntakeMotor;
     private Servo rightFootServo, leftFootServo, compressionServo, camServo;
     private IMU imu;
     private GoBildaPinpointDriver pinpoint;
     private TelemetryManager panelsTelemetry;
+    private VoltageSensor batterySensor;
 
-    private double headingOffsetRad;                 // field heading that IMU yaw 0 corresponds to
-    private double rawX, rawY, rawHeading;           // latest Pinpoint reading (Pinpoint frame)
-    private double worldX, worldY, worldHeading;     // Pinpoint frame to field frame, like last year's txWorldPinpoint
+    private double headingOffsetRad;
+    private double rawX, rawY, rawHeading;
+    private double worldX, worldY, worldHeading;
 
     @Override
     public void init() {
@@ -91,7 +106,11 @@ public class TeleOpStupid extends OpMode {
         rightFront.setDirection(DcMotor.Direction.REVERSE);
         rightBack.setDirection(DcMotor.Direction.REVERSE);
 
-        flywheelMotor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        // Bypass the hub's internal velocity PID; we run our own feedforward + PID
+        flywheelMotor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        // flywheelMotor.setDirection(DcMotorEx.Direction.REVERSE);
+
+        batterySensor = hardwareMap.voltageSensor.iterator().next();
 
         stage1IntakeMotor.setDirection(DcMotor.Direction.REVERSE);
 
@@ -101,15 +120,11 @@ public class TeleOpStupid extends OpMode {
         rightBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         stage1IntakeMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
-        flywheelMotor.setDirection(DcMotorEx.Direction.REVERSE);
-
-        // IMU for field centric driving - set these to match how the Control Hub is mounted
         imu = hardwareMap.get(IMU.class, "imu");
         imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(
                 RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
                 RevHubOrientationOnRobot.UsbFacingDirection.UP)));
 
-        // goBILDA Pinpoint - same setup as last year
         pinpoint = hardwareMap.get(GoBildaPinpointDriver.class, "pinpoint");
         double mmPerTick = inPerTick * 25.4;
         pinpoint.setEncoderResolution(1 / mmPerTick, DistanceUnit.MM);
@@ -118,7 +133,6 @@ public class TeleOpStupid extends OpMode {
                 GoBildaPinpointDriver.EncoderDirection.REVERSED);                        // perpendicular
         pinpoint.resetPosAndIMU();
 
-        // The field pose is kept as a software offset on top of the Pinpoint, like last year's localizer
         rawX = 0;
         rawY = 0;
         rawHeading = 0;
@@ -144,17 +158,42 @@ public class TeleOpStupid extends OpMode {
     private double fieldX() { return worldX + Math.cos(worldHeading) * rawX - Math.sin(worldHeading) * rawY; }
     private double fieldY() { return worldY + Math.sin(worldHeading) * rawX + Math.cos(worldHeading) * rawY; }
 
+    private void updateFlywheel(double nowSec) {
+        if (targetVelocity <= 0) {
+            flywheelMotor.setPower(0);
+            flywheelIntegral = 0;
+            flywheelFirstLoop = true;
+            return;
+        }
+
+        double flywheelError = targetVelocity - flywheelMotor.getVelocity();
+        double flywheelDt = flywheelFirstLoop ? 0 : Math.max(nowSec - flywheelLastTime, 1e-3);
+
+        flywheelIntegral += flywheelKI * flywheelError * flywheelDt;
+        flywheelIntegral = Math.max(-flywheelIntegralMax, Math.min(flywheelIntegralMax, flywheelIntegral));
+        double flywheelDerivative = flywheelFirstLoop ? 0 : (flywheelError - flywheelLastError) / flywheelDt;
+
+        double batteryVolts = batterySensor.getVoltage();
+        double voltageScale = batteryVolts > 1.0 ? nominalVoltage / batteryVolts : 1.0;
+
+        double flywheelPower = flywheelKF * targetVelocity * voltageScale + flywheelKP * flywheelError
+                + flywheelIntegral + flywheelKD * flywheelDerivative;
+        flywheelMotor.setPower(Math.max(0, Math.min(1, flywheelPower)));
+
+        flywheelLastError = flywheelError;
+        flywheelLastTime = nowSec;
+        flywheelFirstLoop = false;
+    }
+
     @Override
     public void loop() {
         updatePinpoint();
 
-        // Options - bot is facing the driver forward direction (toward the red alliance): re-zero the IMU heading only
         if (gamepad1.options) {
             imu.resetYaw();
             headingOffsetRad = Math.toRadians(driverForwardDeg);
         }
 
-        // Share - bot is at the reset pose: zero the odometry position and the heading together
         if (gamepad1.shareWasPressed()) {
             setFieldPose(resetX, resetY, Math.toRadians(resetHeadingDeg));
             imu.resetYaw();
@@ -163,18 +202,16 @@ public class TeleOpStupid extends OpMode {
 
         double poseX = fieldX();
         double poseY = fieldY();
-        double poseHeading = worldHeading + rawHeading;   // Pinpoint heading, telemetry only
+        double poseHeading = worldHeading + rawHeading;
 
-        // Drivetrain (field centric) - one heading for driving and aiming: IMU yaw in the field frame
         double botHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
         double fieldHeading = AngleUnit.normalizeRadians(botHeading + headingOffsetRad);
-        double driveHeading = fieldHeading - Math.toRadians(driverForwardDeg);   // 0 when facing driver forward
+        double driveHeading = fieldHeading - Math.toRadians(driverForwardDeg);
 
         double inputAxial = -gamepad1.left_stick_y;
         double inputLateral = gamepad1.left_stick_x;
         double yaw = gamepad1.right_stick_x;
 
-        // X - single press auto aim at the field center, cancelled by turning with the right stick
         if (gamepad1.xWasPressed()) {
             autoAiming = true;
             aimIntegral = 0;
@@ -200,7 +237,7 @@ public class TeleOpStupid extends OpMode {
                         + Math.signum(aimError) * aimMinPower;
                 aimOutput = Math.max(-aimMaxPower, Math.min(aimMaxPower, aimOutput));
 
-                yaw = -aimOutput;   // positive yaw turns clockwise, positive error needs counterclockwise
+                yaw = -aimOutput;
             }
 
             aimLastError = aimError;
@@ -210,8 +247,6 @@ public class TeleOpStupid extends OpMode {
 
         double lateral = inputLateral * Math.cos(-driveHeading) - inputAxial * Math.sin(-driveHeading);
         double axial = inputLateral * Math.sin(-driveHeading) + inputAxial * Math.cos(-driveHeading);
-
-        lateral *= 1.1;   // counteracts imperfect strafing
 
         double leftFrontPower = axial + lateral + yaw;
         double rightFrontPower = axial - lateral - yaw;
@@ -242,48 +277,64 @@ public class TeleOpStupid extends OpMode {
             stage2IntakeMotor.setPower(0);
         }
 
-        // A - shoot (flywheel at speed + feet down, intakes run once flywheel is up to speed)
-        // double targetVelocity = 2800 * flywheelDrivingPower;
-        // double velocityError = Math.abs(leftFront.getVelocity() - targetVelocity);
-
-        /*
-        if (gamepad1.a) {
-            targetVelocity = 2800 * flywheelShootPower;
-
-            flywheelMotor.setVelocity(targetVelocity);
-            rightFootServo.setPosition(rightFootPositions[0]);
-            leftFootServo.setPosition(leftFootPositions[0]);
-
-            if (velocityError <= targetVelocity * toleranceFraction) {
-                stage1IntakeMotor.setPower(1);
-                stage2IntakeMotor.setPower(1);
-            } else stage2IntakeMotor.setPower(0);
-        }
-
-        rightFootServo.setPosition(rightFootPositions[1]);
-        leftFootServo.setPosition(leftFootPositions[1]);
-        stage2IntakeMotor.setPower(0);
-        flywheelMotor.setVelocity(targetVelocity);
-        */
+        double nowSec = System.nanoTime() / 1e9;
 
         if (gamepad1.a) {
-            targetVelocity = 2800 * 0.45;
+            if (!shooterActive) {
+                shooterActive = true;
+                shooterStartTime = nowSec;
+                stableStartTime = -1;
+                flywheelIntegral = 0;
+                flywheelFirstLoop = true;
+                feeding = false;
+                feedPhaseStart = -1e9;   // first shot fires right away once ready
+            }
+
+            targetVelocity = shooterTargetVelocity;
 
             rightFootServo.setPosition(rightFootPositions[0]);
             leftFootServo.setPosition(leftFootPositions[0]);
 
-            if (flywheelMotor.getVelocity() / targetVelocity >= 0.975) {
-                stage1IntakeMotor.setPower(1);
-                stage2IntakeMotor.setPower(1);
+            double velocityError = Math.abs(targetVelocity - flywheelMotor.getVelocity());
+            double enterTolerance = targetVelocity * toleranceFraction;
+            double exitTolerance = enterTolerance * 1.5;
+
+            if (velocityError <= enterTolerance && stableStartTime < 0) stableStartTime = nowSec;
+            else if (velocityError > exitTolerance) stableStartTime = -1;
+
+            boolean shooterReady = (nowSec - shooterStartTime >= spinUpDelaySec)
+                    && stableStartTime >= 0
+                    && (nowSec - stableStartTime >= stableTimeSec);
+
+            if (shooterReady) {
+                if (feeding) {
+                    stage1IntakeMotor.setPower(1);
+                    stage2IntakeMotor.setPower(1);
+                    if (nowSec - feedPhaseStart >= feedPulseSec) {
+                        feeding = false;
+                        feedPhaseStart = nowSec;
+                    }
+                } else {
+                    stage1IntakeMotor.setPower(0);
+                    stage2IntakeMotor.setPower(0);
+                    if (nowSec - feedPhaseStart >= shotDelaySec) {
+                        feeding = true;
+                        feedPhaseStart = nowSec;
+                    }
+                }
+            } else {
+                feeding = false;
             }
         } else {
+            shooterActive = false;
+            feeding = false;
             targetVelocity = 0;
 
             rightFootServo.setPosition(rightFootPositions[1]);
             leftFootServo.setPosition(leftFootPositions[1]);
         }
 
-        flywheelMotor.setVelocity(targetVelocity);
+        updateFlywheel(nowSec);
 
         if (gamepad2.xWasPressed()) nectarMode = !nectarMode;
 
@@ -291,33 +342,24 @@ public class TeleOpStupid extends OpMode {
         camServo.setPosition(nectarMode ? camPositions[1] : camPositions[0]);
 
         // Debug
-        telemetry.addData("nectarMode", nectarMode);
-        telemetry.addData("botHeadingDeg", Math.toDegrees(botHeading));
-        telemetry.addData("fieldHeadingDeg", Math.toDegrees(fieldHeading));
-        telemetry.addData("pinpointStatus", pinpoint.getDeviceStatus());
-        telemetry.addData("poseX", poseX);
-        telemetry.addData("poseY", poseY);
-        telemetry.addData("poseHeadingDeg", Math.toDegrees(poseHeading));
-        telemetry.addData("autoAiming", autoAiming);
-        telemetry.addData("aimTargetDeg", Math.toDegrees(targetHeading));
-        telemetry.addData("aimErrorDeg", Math.toDegrees(aimError));
-        telemetry.addData("rightFootCmd", rightFootServo.getPosition());
-        telemetry.addData("leftFootCmd", leftFootServo.getPosition());
-        telemetry.addData("compressionCmd", compressionServo.getPosition());
-        telemetry.addData("camCmd", camServo.getPosition());
-        telemetry.addData("flywheelTarget", targetVelocity);
-        telemetry.addData("flywheelVelocity", flywheelMotor.getVelocity());
-        // telemetry.addData("velocityError", velocityError);
+        telemetry.addData("Nectar Mode: ", nectarMode);
+        telemetry.addData("Bot Heading (Degrees): ", Math.toDegrees(botHeading));
+        telemetry.addData("Right Foot Position: ", rightFootServo.getPosition());
+        telemetry.addData("Left Foot Position: ", leftFootServo.getPosition());
+        telemetry.addData("Flywheel Target Velocity: ", targetVelocity);
+        telemetry.addData("Flywheel Current Velocity: ", flywheelMotor.getVelocity());
+
         telemetry.addData("flywheelPosition", leftFront.getCurrentPosition());
-        // Panels telemetry (also forwards to the Driver Station)
-        panelsTelemetry.debug("poseX", poseX);
-        panelsTelemetry.debug("poseY", poseY);
-        panelsTelemetry.debug("poseHeadingDeg", Math.toDegrees(poseHeading));
-        panelsTelemetry.debug("fieldHeadingDeg", Math.toDegrees(fieldHeading));
-        panelsTelemetry.debug("pinpointStatus", String.valueOf(pinpoint.getDeviceStatus()));
-        panelsTelemetry.debug("autoAiming", autoAiming);
-        panelsTelemetry.debug("aimTargetDeg", Math.toDegrees(targetHeading));
-        panelsTelemetry.debug("aimErrorDeg", Math.toDegrees(aimError));
+
+        panelsTelemetry.debug("Pose X: ", poseX);
+        panelsTelemetry.debug("Pose Y: ", poseY);
+        panelsTelemetry.debug("Pose Heading (Degrees): ", Math.toDegrees(poseHeading));
+        panelsTelemetry.debug("Field Heading (Degrees): ", Math.toDegrees(fieldHeading));
+        panelsTelemetry.debug("Pinpoint Status: ", String.valueOf(pinpoint.getDeviceStatus()));
+        panelsTelemetry.debug("Auto Aiming: ", autoAiming);
+        panelsTelemetry.debug("AutoAim Target Degrees: ", Math.toDegrees(targetHeading));
+        panelsTelemetry.debug("Auto Aim Target Error: ", Math.toDegrees(aimError));
+        panelsTelemetry.debug("Flywheel Error: ", targetVelocity - flywheelMotor.getVelocity());
         panelsTelemetry.update(telemetry);
 
     }
