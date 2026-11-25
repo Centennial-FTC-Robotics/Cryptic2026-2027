@@ -21,22 +21,22 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 public class TeleOpStupid extends OpMode {
 
     public static double targetVelocity = 0;
-    public static double shooterTargetVelocity = 2800 * 0.425; // this was 0.4 before
-    public static double toleranceFraction = 0.04;
+    public static double shooterTargetVelocity = 1080; // this was 0.4 before 2800 max
+    public static double toleranceFraction = 0.02;
     public static double spinUpDelaySec = 0;        // minimum wait after pressing A
-    public static double stableTimeSec = 0.5;       // must stay within tolerance this long
+    public static double stableTimeSec = 0.2;       // must stay within tolerance this long
     public static double feedPulseSec = 0.3;        // how long the intake feeds per shot
-    public static double shotDelaySec = 0.3;        // pause between shots so the flywheel can recover
+    public static double shotDelaySec = 0.25;        // pause between shots so the flywheel can recover
 
     public static double flywheelKF = 1.0 / 2800;   // 2800 = max ticks per sec
-    public static double flywheelKP = 0.005;
-    public static double flywheelKI = 0.001;
-    public static double flywheelKD = 0.0;
-    public static double flywheelIntegralMax = 0.2; // in motor power units
+    public static double flywheelKP = 0.004;
+    public static double flywheelKI = 0.0005;
+    public static double flywheelKD = 0.0005;
+    public static double flywheelIntegralMax = 0.6; // in motor power units
     public static double nominalVoltage = 12.0;     // kF is calibrated at this battery voltage
 
-    public static double[] rightFootPositions = { 0.14, 0.0 };        // { Extended, Retracted }
-    public static double[] leftFootPositions = { 0.14, 0.0 };         // { Extended, Retracted }
+    public static double[] rightFootPositions = { 0.16, 0.0 };        // { Extended, Retracted }
+    public static double[] leftFootPositions = { 0.16, 0.0 };         // { Extended, Retracted }
     public static double[] compressionPositions = { 1.0, 0.0, 0.5 };  // { Pollen, Nectar, Blocking }
     public static double[] camPositions = { 0.0, 0.4 };               // { Pollen, Nectar }
 
@@ -342,13 +342,14 @@ public class TeleOpStupid extends OpMode {
         camServo.setPosition(nectarMode ? camPositions[1] : camPositions[0]);
 
         // Debug
-        telemetry.addData("Nectar Mode: ", nectarMode);
+       // telemetry.addData("Nectar Mode: ", nectarMode);
         telemetry.addData("Bot Heading (Degrees): ", Math.toDegrees(botHeading));
-        telemetry.addData("Right Foot Position: ", rightFootServo.getPosition());
-        telemetry.addData("Left Foot Position: ", leftFootServo.getPosition());
+        //telemetry.addData("Right Foot Position: ", rightFootServo.getPosition());
+        //telemetry.addData("Left Foot Position: ", leftFootServo.getPosition());
         telemetry.addData("Flywheel Target Velocity: ", targetVelocity);
         telemetry.addData("Flywheel Current Velocity: ", flywheelMotor.getVelocity());
-
+        telemetry.addData("Flywheel Power", flywheelMotor.getPower());
+        telemetry.addData("Flywheel Integral", flywheelIntegral);
         telemetry.addData("flywheelPosition", leftFront.getCurrentPosition());
 
         panelsTelemetry.debug("Pose X: ", poseX);
@@ -356,10 +357,10 @@ public class TeleOpStupid extends OpMode {
         panelsTelemetry.debug("Pose Heading (Degrees): ", Math.toDegrees(poseHeading));
         panelsTelemetry.debug("Field Heading (Degrees): ", Math.toDegrees(fieldHeading));
         panelsTelemetry.debug("Pinpoint Status: ", String.valueOf(pinpoint.getDeviceStatus()));
-        panelsTelemetry.debug("Auto Aiming: ", autoAiming);
-        panelsTelemetry.debug("AutoAim Target Degrees: ", Math.toDegrees(targetHeading));
-        panelsTelemetry.debug("Auto Aim Target Error: ", Math.toDegrees(aimError));
-        panelsTelemetry.debug("Flywheel Error: ", targetVelocity - flywheelMotor.getVelocity());
+       // panelsTelemetry.debug("Auto Aiming: ", autoAiming);
+       // panelsTelemetry.debug("AutoAim Target Degrees: ", Math.toDegrees(targetHeading));
+       // panelsTelemetry.debug("Auto Aim Target Error: ", Math.toDegrees(aimError));
+        //panelsTelemetry.debug("Flywheel Error: ", targetVelocity - flywheelMotor.getVelocity());
         panelsTelemetry.update(telemetry);
 
     }
